@@ -61,6 +61,13 @@ def main():
         # add both number input and slider to display each data
         if "data" in st.session_state:
             data = st.session_state.data
+
+            every_keys = list(dict.fromkeys([k for d in data for k in d["data"].keys()]))
+            st.session_state.display_keys = {k: True for k in every_keys}
+            with st.expander("Enabled fields", expanded=False):
+                for key in st.session_state.display_keys:
+                    st.session_state.display_keys[key] = st.checkbox(key, value=st.session_state.display_keys[key])
+
             col3, col4 = st.columns([1, 4])
 
             with col3:
@@ -74,7 +81,7 @@ def main():
                     st.session_state.sample_id = sample_id_slider - 1
 
             st.write(data[st.session_state.sample_id]["sample_id"])
-            st.write(data[st.session_state.sample_id]["data"])
+            st.write({k: v for k, v in data[st.session_state.sample_id]["data"].items() if st.session_state.display_keys[k]})
 
 
 if __name__ == "__main__":
