@@ -30,6 +30,7 @@ if "has_launched" not in st.session_state:
     st.session_state.has_launched = True
     st.session_state.uploaded_files = []
     st.session_state.eval_logs = None
+    st.session_state.modal_info = None
 
 
 def load_eval_artifact(uploaded_file: UploadedFile):
@@ -56,6 +57,11 @@ def load_eval_artifact(uploaded_file: UploadedFile):
 
 
 def main():
+    if st.session_state.modal_info is not None:
+        eval_logs, testfile = st.session_state.modal_info
+        open_modal(eval_logs, testfile)
+        st.session_state.modal_info = None
+
     file = st.file_uploader("Upload artifact file", type=["zip"])
     if file is not None and file.name not in [
         f.name for f in st.session_state.uploaded_files
@@ -95,6 +101,7 @@ def main():
                 pass  # TODO
 
     for eval_name, rows in measures.items():
+        st.header(eval_name)
         fig = go.Figure()
         df = pd.DataFrame(rows)
         for uploaded_file in st.session_state.uploaded_files:
@@ -125,13 +132,12 @@ def main():
             height=600,
             xaxis_title="Accuracy",
             yaxis_title="Test File",
-            title=eval_name,
         )
         event_dict = st.plotly_chart(fig, on_select="rerun", selection_mode="points")
         if event_dict["selection"]["points"]:
             testfile = event_dict["selection"]["points"][0]["y"]
             eval_logs = event_dict["selection"]["points"][0]["customdata"]
-            open_modal(eval_logs, testfile)
+            st.session_state.modal_info = (eval_logs, testfile)
 
 
 @st.dialog("Evalution logs", width="large")
