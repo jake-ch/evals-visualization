@@ -1,87 +1,117 @@
-import streamlit as st
 import json
+import logging
+import os
+import shutil
+import zipfile
 from collections import defaultdict
-from io import StringIO
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+from streamlit.runtime.uploaded_file_manager import UploadedFile
+
+TEMP_DIR = Path(__file__).parent / "./tmp/extracted"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger()
+logger.addHandler(logging.StreamHandler())
+logger.setLevel(logging.INFO)
 
 st.set_page_config(layout="wide")
 
-def load_record_jsonl(uploaded_file):
-    spec, final_report, data = None, None, None
-    file_data = StringIO(uploaded_file.getvalue().decode("utf-8")).read()
-    lines = file_data.strip().split("\n")
-    data_groups = defaultdict(list)
-    for i, line in enumerate(lines):
-        obj = json.loads(line)
-        if "spec" in obj:
-            spec = obj["spec"]
-        elif "final_report" in obj:
-            final_report = obj["final_report"]
-        else:
-            data_groups[obj["sample_id"]].append(obj["data"])
+# on first run, initialize session state
+if "has_launched" not in st.session_state:
+    shutil.rmtree(TEMP_DIR, ignore_errors=True)
+    st.session_state.has_launched = True
+    st.session_state.filenames = []
+    st.session_state.measures = defaultdict(lambda: defaultdict(list))
 
-    # merge each data group into a single dictionary
-    data = []
-    for sample_id, data_group in data_groups.items():
-        merged_data = {}
-        for data_dict in data_group:
-            merged_data.update(data_dict)
-        data.append(
-            {
-                "sample_id": sample_id,
-                "data": merged_data,
-            }
-        )
 
-    # sort data by sample_id, where sample_id format is: <eval_name>.<minor-version>.<id_to_sort>
-    data.sort(key=lambda x: int(x["sample_id"].split(".")[-1]))
+def load_eval_artifact(uploaded_file: UploadedFile):
+    ext_path = TEMP_DIR / uploaded_file.name
+    with zipfile.ZipFile(uploaded_file, "r") as zip_ref:
+        zip_ref.extractall(ext_path)
 
-    return spec, final_report, data
+    jsonl_files = [
+        os.path.join(ext_path, f) for f in os.listdir(ext_path) if f.endswith(".jsonl")
+    ]
+
+    result = {}
+    for filename in jsonl_files:
+        final_report, eval_name = None, None
+        with open(filename) as f:
+            for line in f:
+                data = json.loads(line)
+                if "final_report" in data:
+                    final_report = data["final_report"]
+                if "spec" in data:
+                    eval_name = data["spec"]["run_config"]["eval_spec"]["args"][
+                        "testset_path"
+                    ]
+        result[eval_name] = final_report
+
+    result = dict(sorted(result.items()))
+    return result
+
 
 def main():
-    # set two columns layout, where first column is 1/3 of the page width
-    col1, col2 = st.columns([1, 3])
+    file = st.file_uploader("Upload artifact file", type=["zip"])
+    if file is not None:
+        reports = load_eval_artifact(file)
+        filename = file.name.split(".")[0] if "." in file.name else file.name
+        st.session_state.filenames.append(filename)
 
-    with col1:
-        file = st.file_uploader("Upload record file", type="jsonl")
-        if file is not None:
-            spec, report, data = load_record_jsonl(file)
-            # save spec, report, data to session state
-            st.session_state.spec = spec
-            st.session_state.report = report
-            st.session_state.data = data
-            st.session_state.sample_id = 0
+        measures = st.session_state.measures
 
-            st.write(f"eval_name: {st.session_state.spec['eval_name']}")
-            st.write(f"run_id: {st.session_state.spec['run_id']}")
-            # write report in json format
-            st.write(st.session_state.report)
+        for eval_name, report in reports.items():
+            if eval_name.startswith("alf_fcagent") or eval_name.startswith(
+                "alf_kbagent"
+            ):
+                # accuracy: overall
+                measures[eval_name]["overall"].append(report["overall"]["accuracy"])
+                # accuracy: per testfile
+                for testfile, result in report["per_testfile"].items():
+                    measures[eval_name][testfile].append(result["accuracy"])
+            elif eval_name.startswith("alf_faq"):
+                measures[eval_name + "/overall"]["retrieval_correct"].append(
+                    report["metric"]["overall"]["retrieval_correct"]
+                )
+                measures[eval_name + "/overall"]["referenced_correct"].append(
+                    report["metric"]["overall"]["referenced_correct"]
+                )
+            elif eval_name.startswith("alf_rag"):
+                # fact check metrics
+                measures[eval_name + "/fact_check"]["accuracy"].append(
+                    report["fact_check"]["metrics"]["accuracy"]
+                )
+                measures[eval_name + "/fact_check"]["precision"].append(
+                    report["fact_check"]["metrics"]["precision"]
+                )
+                measures[eval_name + "/fact_check"]["recall"].append(
+                    report["fact_check"]["metrics"]["recall"]
+                )
+                # ragas
+                measures[eval_name + "/ragas"]["faithfulness"].append(
+                    report["ragas"]["faithfulness"]
+                )
+                measures[eval_name + "/ragas"]["answer_correctness"].append(
+                    report["ragas"]["answer_correctness"]
+                )
+                measures[eval_name + "/ragas"]["answer_relevancy"].append(
+                    report["ragas"]["answer_relevancy"]
+                )
 
-
-    with col2:
-        # add both number input and slider to display each data
-        if "data" in st.session_state:
-            data = st.session_state.data
-
-            every_keys = list(dict.fromkeys([k for d in data for k in d["data"].keys()]))
-            st.session_state.display_keys = {k: True for k in every_keys}
-            with st.expander("Enabled fields", expanded=False):
-                for key in st.session_state.display_keys:
-                    st.session_state.display_keys[key] = st.checkbox(key, value=st.session_state.display_keys[key])
-
-            col3, col4 = st.columns([1, 4])
-
-            with col3:
-                sample_id_input = st.number_input("sample_id", 1, len(data), value=st.session_state.sample_id + 1)
-                if sample_id_input != st.session_state.sample_id + 1:
-                    st.session_state.sample_id = sample_id_input - 1
-
-            with col4:
-                sample_id_slider = st.slider("slider", 1, len(data), value=st.session_state.sample_id + 1)
-                if sample_id_slider != st.session_state.sample_id + 1:
-                    st.session_state.sample_id = sample_id_slider - 1
-
-            st.write(data[st.session_state.sample_id]["sample_id"])
-            st.write({k: v for k, v in data[st.session_state.sample_id]["data"].items() if st.session_state.display_keys[k]})
+        for eval_name, measure_per_eval in measures.items():
+            with st.expander(eval_name, expanded=False):
+                df = pd.DataFrame(
+                    [ms for ms in measure_per_eval.values()],
+                    index=list(measure_per_eval.keys()),
+                    columns=[filename for filename in st.session_state.filenames],
+                )
+                st.bar_chart(df, stack=False, horizontal=True)
 
 
 if __name__ == "__main__":
