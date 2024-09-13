@@ -106,13 +106,13 @@ def main():
             artifact_df = df[df["artifact"] == artifact]
             fig.add_trace(
                 go.Bar(
-                    x=artifact_df["accuracy"],
+                    x=artifact_df["accuracy"].clip(lower=1e-4),
                     y=artifact_df["testfile"],
                     name=artifact,
                     orientation="h",
                     text=artifact_df["text"],
                     customdata=artifact_df["eval_logs"],
-                    hovertemplate="accuracy: %{x:.2f}",
+                    hovertemplate="accuracy: %{x:.3f}",
                     marker=dict(
                         color=px.colors.qualitative.D3[
                             df["artifact"].unique().tolist().index(artifact)
@@ -137,7 +137,7 @@ def main():
 @st.dialog("Evalution logs", width="large")
 def open_modal(item: dict, title: str):
     st.header(title)
-    st.json(item)
+    st.code(json.dumps(item, ensure_ascii=False, indent=2), language="json")
 
 
 if __name__ == "__main__":
