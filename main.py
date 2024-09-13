@@ -7,6 +7,8 @@ from collections import defaultdict
 from pathlib import Path
 
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 from streamlit.runtime.uploaded_file_manager import UploadedFile
 
@@ -26,8 +28,8 @@ st.set_page_config(layout="wide")
 if "has_launched" not in st.session_state:
     shutil.rmtree(TEMP_DIR, ignore_errors=True)
     st.session_state.has_launched = True
-    st.session_state.filenames = []
-    st.session_state.measures = defaultdict(lambda: defaultdict(list))
+    st.session_state.uploaded_files = []
+    st.session_state.eval_logs = None
 
 
 def load_eval_artifact(uploaded_file: UploadedFile):
@@ -35,23 +37,19 @@ def load_eval_artifact(uploaded_file: UploadedFile):
     with zipfile.ZipFile(uploaded_file, "r") as zip_ref:
         zip_ref.extractall(ext_path)
 
-    jsonl_files = [
-        os.path.join(ext_path, f) for f in os.listdir(ext_path) if f.endswith(".jsonl")
+    json_files = [
+        os.path.join(ext_path, f) for f in os.listdir(ext_path) if f.endswith(".json")
     ]
 
     result = {}
-    for filename in jsonl_files:
-        final_report, eval_name = None, None
-        with open(filename) as f:
-            for line in f:
-                data = json.loads(line)
-                if "final_report" in data:
-                    final_report = data["final_report"]
-                if "spec" in data:
-                    eval_name = data["spec"]["run_config"]["eval_spec"]["args"][
-                        "testset_path"
-                    ]
-        result[eval_name] = final_report
+    for filename in json_files:
+        # filename is TextIOWrapper. read it as json
+        with open(filename) as rf:
+            data = json.load(rf)
+            if "spec" not in data:
+                continue
+            eval_name = data["spec"]["run_config"]["eval_spec"]["args"]["testset_path"]
+        result[eval_name] = data
 
     result = dict(sorted(result.items()))
     return result
@@ -59,59 +57,87 @@ def load_eval_artifact(uploaded_file: UploadedFile):
 
 def main():
     file = st.file_uploader("Upload artifact file", type=["zip"])
-    if file is not None:
-        reports = load_eval_artifact(file)
-        filename = file.name.split(".")[0] if "." in file.name else file.name
-        st.session_state.filenames.append(filename)
+    if file is not None and file.name not in [
+        f.name for f in st.session_state.uploaded_files
+    ]:
+        st.session_state.uploaded_files.append(file)
 
-        measures = st.session_state.measures
+    measures = defaultdict(list)
+    for uploaded_file in st.session_state.uploaded_files:
+        result = load_eval_artifact(uploaded_file)
+        artifact = (
+            uploaded_file.name.split(".")[0]
+            if "." in uploaded_file.name
+            else uploaded_file.name
+        )
 
-        for eval_name, report in reports.items():
+        for eval_name, data in result.items():
+            report = data["final_report"]
             if eval_name.startswith("alf_fcagent") or eval_name.startswith(
                 "alf_kbagent"
             ):
-                # accuracy: overall
-                measures[eval_name]["overall"].append(report["overall"]["accuracy"])
-                # accuracy: per testfile
-                for testfile, result in report["per_testfile"].items():
-                    measures[eval_name][testfile].append(result["accuracy"])
+                for testfile, measure in report["per_testfile"].items():
+                    row = {
+                        "artifact": artifact,
+                        "eval_name": eval_name,
+                        "testfile": testfile,
+                        "accuracy": measure["accuracy"],
+                        "correct": measure["correct"],
+                        "wrong": measure["all"] - measure["correct"],
+                        "all": measure["all"],
+                        "eval_logs": data["eval_logs"][testfile],
+                        "text": f"{measure['correct']}/{measure['all']}",
+                    }
+                    measures[eval_name].append(row)
             elif eval_name.startswith("alf_faq"):
-                measures[eval_name + "/overall"]["retrieval_correct"].append(
-                    report["metric"]["overall"]["retrieval_correct"]
-                )
-                measures[eval_name + "/overall"]["referenced_correct"].append(
-                    report["metric"]["overall"]["referenced_correct"]
-                )
+                pass  # TODO
             elif eval_name.startswith("alf_rag"):
-                # fact check metrics
-                measures[eval_name + "/fact_check"]["accuracy"].append(
-                    report["fact_check"]["metrics"]["accuracy"]
-                )
-                measures[eval_name + "/fact_check"]["precision"].append(
-                    report["fact_check"]["metrics"]["precision"]
-                )
-                measures[eval_name + "/fact_check"]["recall"].append(
-                    report["fact_check"]["metrics"]["recall"]
-                )
-                # ragas
-                measures[eval_name + "/ragas"]["faithfulness"].append(
-                    report["ragas"]["faithfulness"]
-                )
-                measures[eval_name + "/ragas"]["answer_correctness"].append(
-                    report["ragas"]["answer_correctness"]
-                )
-                measures[eval_name + "/ragas"]["answer_relevancy"].append(
-                    report["ragas"]["answer_relevancy"]
-                )
+                pass  # TODO
 
-        for eval_name, measure_per_eval in measures.items():
-            with st.expander(eval_name, expanded=False):
-                df = pd.DataFrame(
-                    [ms for ms in measure_per_eval.values()],
-                    index=list(measure_per_eval.keys()),
-                    columns=[filename for filename in st.session_state.filenames],
+    for eval_name, rows in measures.items():
+        fig = go.Figure()
+        df = pd.DataFrame(rows)
+        for uploaded_file in st.session_state.uploaded_files:
+            artifact = (
+                uploaded_file.name.split(".")[0]
+                if "." in uploaded_file.name
+                else uploaded_file.name
+            )
+            artifact_df = df[df["artifact"] == artifact]
+            fig.add_trace(
+                go.Bar(
+                    x=artifact_df["accuracy"],
+                    y=artifact_df["testfile"],
+                    name=artifact,
+                    orientation="h",
+                    text=artifact_df["text"],
+                    customdata=artifact_df["eval_logs"],
+                    hovertemplate="accuracy: %{x:.2f}",
+                    marker=dict(
+                        color=px.colors.qualitative.D3[
+                            df["artifact"].unique().tolist().index(artifact)
+                        ]
+                    ),
                 )
-                st.bar_chart(df, stack=False, horizontal=True)
+            )
+        fig.update_layout(
+            barmode="group",
+            height=600,
+            xaxis_title="Accuracy",
+            yaxis_title="Test File",
+            title=eval_name,
+        )
+        event_dict = st.plotly_chart(fig, on_select="rerun", selection_mode="points")
+        if event_dict["selection"]["points"]:
+            testfile = event_dict["selection"]["points"][0]["y"]
+            eval_logs = event_dict["selection"]["points"][0]["customdata"]
+            open_modal(eval_logs, testfile)
+
+
+@st.dialog("Evalution logs", width="large")
+def open_modal(item: dict, title: str):
+    st.header(title)
+    st.json(item)
 
 
 if __name__ == "__main__":
